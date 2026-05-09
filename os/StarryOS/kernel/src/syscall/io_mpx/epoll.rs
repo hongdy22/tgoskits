@@ -1,3 +1,4 @@
+use alloc::vec;
 use core::time::Duration;
 
 use ax_errno::{AxError, AxResult};
@@ -8,6 +9,7 @@ use linux_raw_sys::general::{
     EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLL_CTL_DEL, EPOLL_CTL_MOD, epoll_event, timespec,
 };
 use starry_signal::SignalSet;
+use starry_vm::vm_write_slice;
 
 use crate::{
     file::{
@@ -93,20 +95,28 @@ fn do_epoll_wait(
     if maxevents <= 0 {
         return Err(AxError::InvalidInput);
     }
-    let events = events.get_as_mut_slice(maxevents as usize)?;
+    let maxevents = maxevents as usize;
+    let _ = events.get_as_mut_slice(maxevents)?;
+    let mut ready_events = vec![epoll_event { events: 0, data: 0 }; maxevents];
 
-    with_blocked_signals(
+    let count = with_blocked_signals(
         nullable!(sigmask.get_as_ref())?.copied(),
         || match block_on(future::timeout(
             timeout,
             poll_io(epoll.as_ref(), IoEvents::IN, false, || {
-                epoll.poll_events(events)
+                epoll.poll_events(&mut ready_events)
             }),
         )) {
             Ok(r) => r.map(|n| n as _),
             Err(_) => Ok(0),
         },
-    )
+    )?;
+
+    if count > 0 {
+        vm_write_slice(events.as_ptr(), &ready_events[..count as usize])?;
+    }
+
+    Ok(count)
 }
 
 pub fn sys_epoll_pwait(
