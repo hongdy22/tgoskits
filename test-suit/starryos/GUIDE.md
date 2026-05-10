@@ -44,6 +44,9 @@ test-suit/starryos/
         qemu-<arch>.toml
         python/
           test_hello.py
+      codex-help/
+        qemu-x86_64.toml
+        assets.toml
       bugfix/
         qemu-<arch>.toml
         <subcase>/c/CMakeLists.txt
@@ -83,10 +86,12 @@ test-suit/starryos/
 
 | Pipeline | 触发条件 | 行为 |
 | --- | --- | --- |
-| `plain` | 无 `test_commands`，且无 `c/`、`sh/`、`python/` | 直接启动共享 rootfs，并追加 QEMU `-snapshot` |
+| `plain` | 无 `test_commands`，且无 `c/`、`sh/`、`python/`、`rust/`、`assets.toml` | 直接启动共享 rootfs，并追加 QEMU `-snapshot` |
 | `c` | case 目录下存在 `c/` | 使用 CMake 交叉编译，安装产物到 rootfs overlay |
 | `sh` | case 目录下存在 `sh/` | 将 shell 脚本注入 `/usr/bin/` |
 | `python` | case 目录下存在 `python/` | 在 staging rootfs 中安装 `python3`，并注入 `.py` 文件 |
+| `rust` | case 目录下存在 `rust/` | 交叉编译 Rust musl 二进制，并注入到 `/usr/bin/` |
+| `prebuilt-assets` | case 目录下存在 `assets.toml` | 校验 host 侧预编译资产的 SHA-256，并注入到指定 guest 路径 |
 | `grouped` | `qemu-<arch>.toml` 中存在 `test_commands` | 构建子目录中的 C subcase，生成 `/usr/bin/starry-run-case-tests` 顺序执行命令 |
 
 Pipeline case 会创建每个 case 独立的 rootfs 副本，并把注入后的 rootfs 缓存在：
@@ -107,7 +112,7 @@ plain case 不复制 rootfs，依赖 QEMU `-snapshot` 保证 guest 写入不落�
 | `uefi` | 是否使用 UEFI |
 | `to_bin` | 是否把 ELF 转为裸二进制 |
 | `shell_prefix` | 等待 guest shell 的提示符 |
-| `shell_init_cmd` | plain/C/sh/python case 的 guest 命令 |
+| `shell_init_cmd` | plain/C/sh/python/rust/prebuilt-assets case 的 guest 命令 |
 | `test_commands` | grouped case 的 guest 命令列表；不能与 `shell_init_cmd` 同时使用 |
 | `success_regex` | 全部匹配才 PASS |
 | `fail_regex` | 任一匹配即 FAIL |
@@ -228,6 +233,37 @@ Python case 使用 `python/`：
 
 Python pipeline 会自动在 staging rootfs 中安装 `python3`，再把 `.py` 文件复制到 `/usr/bin/`。
 
+## Prebuilt Assets 用例
+
+当 case 需要注入不适合提交到仓库的大型预编译二进制时，使用 `assets.toml`：
+
+```text
+<case>/
+  qemu-<arch>.toml
+  assets.toml
+```
+
+`assets.toml` 示例：
+
+```toml
+[[files]]
+source = "target/codex/assets/codex"
+guest_path = "/usr/local/bin/codex"
+sha256 = "..."
+mode = "0755"
+
+[[files]]
+source = "assets/root/.config/example.toml"
+guest_path = "/root/.config/example.toml"
+sha256 = "..."
+mode = "0644"
+```
+
+- `source` 可以是绝对路径；相对路径会先按仓库根目录解析，再按 case 目录解析。
+- `guest_path` 必须是 guest 内绝对路径，不能包含 `..`。
+- `mode` 是可选八进制权限字符串。需要执行的二进制通常设置为 `0755`。
+- 大型二进制本身不要提交进仓库，应由单独的准备脚本放在 `target/` 或本地缓存中。
+
 ## Board 用例
 
 Board 用例目录结构：
@@ -284,7 +320,7 @@ cargo xtask starry test board -g normal -c npu-yolov8 --board orangepi-5-plus
 - 只为实际验证通过的架构添加 `qemu-<arch>.toml`。
 - `qemu-smp1` / `qemu-smp4` 的并发度由 build config 决定；不要只改 QEMU `-smp` 而忘记构建配置。
 - `shell_init_cmd` 和 `test_commands` 不能同时使用。
-- 一个 case 只能定义一种 pipeline；不要同时放 `c/`、`sh/`、`python/` 或 `test_commands`。
+- 一个 case 只能定义一种 pipeline；不要同时放 `c/`、`sh/`、`python/`、`rust/`、`assets.toml` 或 `test_commands`。
 - `success_regex` 选择稳定且唯一的成功行。
 - `fail_regex` 保持精确，避免匹配正常输出如 `failed: 0`。
 - 不要在同一个工作区并行运行多个 `cargo xtask starry test qemu`，rootfs 和生成配置可能互相影响。

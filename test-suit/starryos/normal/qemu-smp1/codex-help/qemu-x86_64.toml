@@ -1,0 +1,80 @@
+args = [
+    "-machine",
+    "q35",
+    "-nographic",
+    "-m",
+    "2G",
+    "-device",
+    "virtio-blk-pci,drive=disk0",
+    "-drive",
+    "id=disk0,if=none,format=raw,file=${workspace}/target/rootfs/rootfs-x86_64-alpine.img",
+    "-device",
+    "virtio-net-pci,netdev=net0",
+    "-netdev",
+    "user,id=net0",
+]
+uefi = false
+to_bin = false
+shell_prefix = "root@starry:"
+shell_init_cmd = '''
+export HOME=/root
+export USER=root
+export SHELL=/bin/sh
+export TERM=xterm-256color
+export PATH=/usr/local/bin:/usr/bin:/bin:/sbin
+export CODEX_HOME=/root/codex-stage-g-home
+rm -rf "$CODEX_HOME" /tmp/codex-stage-g
+mkdir -p "$CODEX_HOME" /tmp/codex-stage-g
+set -e
+
+codex --version | tee /tmp/codex-stage-g/version.txt
+codex --help > /tmp/codex-stage-g/help.txt
+codex exec --help > /tmp/codex-stage-g/exec-help.txt
+rg --version > /tmp/codex-stage-g/rg-version.txt
+
+grep -F "codex-cli 0.115.0" /tmp/codex-stage-g/version.txt
+grep -F "Codex CLI" /tmp/codex-stage-g/help.txt
+grep -F "Usage:" /tmp/codex-stage-g/exec-help.txt
+grep -F "ripgrep 15.1.0" /tmp/codex-stage-g/rg-version.txt
+echo "STARRY_CODEX_STAGE_G_HELP_OK"
+
+set +e
+codex login status -c 'cli_auth_credentials_store="file"' > /tmp/codex-stage-g/login-status.txt 2>&1
+LOGIN_RC=$?
+set -e
+cat /tmp/codex-stage-g/login-status.txt
+test "$LOGIN_RC" -ne 0
+grep -F "Not logged in" /tmp/codex-stage-g/login-status.txt
+echo "STARRY_CODEX_STAGE_G_LOGIN_STATUS_OK"
+
+mkdir -p /tmp/codex-stage-g/workspace
+cd /tmp/codex-stage-g/workspace
+git init
+git config user.name 'StarryOS Stage G'
+git config user.email 'stage-g@example.invalid'
+printf '# Stage G Workspace\n' > README.md
+git add README.md
+git commit -m 'stage g baseline'
+printf 'STARRY_STAGE_G_WORKSPACE_TOKEN\n' >> README.md
+git status --short | tee /tmp/codex-stage-g/git-status.txt
+git diff -- README.md | tee /tmp/codex-stage-g/git-diff.txt
+rg -n --with-filename 'STARRY_STAGE_G_WORKSPACE_TOKEN' README.md | tee /tmp/codex-stage-g/rg-workspace.txt
+grep -E '^ M README\.md$' /tmp/codex-stage-g/git-status.txt
+grep -F '+STARRY_STAGE_G_WORKSPACE_TOKEN' /tmp/codex-stage-g/git-diff.txt
+grep -F 'README.md:2:STARRY_STAGE_G_WORKSPACE_TOKEN' /tmp/codex-stage-g/rg-workspace.txt
+echo "STARRY_CODEX_STAGE_G_LOCAL_WORKSPACE_OK"
+
+echo "STARRY_CODEX_STAGE_G_CODEX_HELP_PASSED"
+'''
+success_regex = ["(?m)^STARRY_CODEX_STAGE_G_CODEX_HELP_PASSED\\s*$"]
+fail_regex = [
+    "(?i)\\bpanic(?:ked)?\\b",
+    "(?i)page fault",
+    "(?i)segmentation fault",
+    "(?i)unsupported syscall",
+    "(?i)codex.*fatal",
+    "No such process",
+    "sys_prctl: unsupported option 23",
+    "(?m)^STARRY_CODEX_STAGE_G_CODEX_HELP_FAILED\\s*$",
+]
+timeout = 420
