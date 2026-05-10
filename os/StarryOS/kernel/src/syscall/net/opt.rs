@@ -11,6 +11,43 @@ const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
 const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
 
+fn read_int_sockopt(optval: UserConstPtr<u8>, optlen: socklen_t) -> AxResult<i32> {
+    if (optlen as usize) < size_of::<i32>() {
+        return Err(AxError::InvalidInput);
+    }
+    Ok(*optval.cast::<i32>().get_as_ref()?)
+}
+
+fn set_tcp_keepalive_sockopt(
+    socket: &Socket,
+    level: u32,
+    optname: u32,
+    optval: UserConstPtr<u8>,
+    optlen: socklen_t,
+) -> AxResult<bool> {
+    use linux_raw_sys::net::{TCP_KEEPCNT, TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_USER_TIMEOUT};
+
+    if level != PROTO_TCP
+        || !matches!(
+            optname,
+            TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT | TCP_USER_TIMEOUT
+        )
+    {
+        return Ok(false);
+    }
+
+    let mut no_delay = false;
+    socket.get_option(GetSocketOption::NoDelay(&mut no_delay))?;
+    let value = read_int_sockopt(optval, optlen)?;
+    if matches!(optname, TCP_KEEPIDLE | TCP_KEEPINTVL | TCP_KEEPCNT) && value <= 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if optname == TCP_USER_TIMEOUT && value < 0 {
+        return Err(AxError::InvalidInput);
+    }
+    Ok(true)
+}
+
 mod conv {
     use ax_errno::{AxError, AxResult};
     use axnet::options::UnixCredentials;
@@ -180,18 +217,12 @@ pub fn sys_setsockopt(
                 return Ok(0);
             }
             (SOL_SOCKET, SO_RCVBUF | SO_RCVBUFFORCE) => {
-                if (optlen as usize) < size_of::<i32>() {
-                    return Err(AxError::InvalidInput);
-                }
-                let value = *optval.cast::<i32>().get_as_ref()?;
+                let value = read_int_sockopt(optval, optlen)?;
                 socket.set_receive_buffer_size(value.max(0) as usize);
                 return Ok(0);
             }
             (SOL_SOCKET, SO_PASSCRED) => {
-                if (optlen as usize) < size_of::<i32>() {
-                    return Err(AxError::InvalidInput);
-                }
-                let value = *optval.cast::<i32>().get_as_ref()?;
+                let value = read_int_sockopt(optval, optlen)?;
                 socket.set_passcred(value != 0);
                 return Ok(0);
             }
@@ -207,6 +238,10 @@ pub fn sys_setsockopt(
     }
 
     let socket = Socket::from_fd(fd)?;
+    if set_tcp_keepalive_sockopt(&socket, level, optname, optval, optlen)? {
+        return Ok(0);
+    }
+
     macro_rules! dispatch {
         ($which:ident) => {
             socket.set_option(SetSocketOption::$which(get(optval, optlen)?))?;

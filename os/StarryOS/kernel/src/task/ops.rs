@@ -10,7 +10,7 @@ use ax_task::{AxTaskRef, TaskInner, WeakAxTaskRef, current};
 use bytemuck::AnyBitPattern;
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use spin::RwLock;
-use starry_process::{Pid, ProcessGroup, Session};
+use starry_process::{Pid, Process, ProcessGroup, Session};
 use starry_signal::{SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 use weak_map::WeakMap;
@@ -96,6 +96,27 @@ pub fn get_process_data(pid: Pid) -> AxResult<Arc<ProcessData>> {
         return Ok(current().as_thread().proc_data.clone());
     }
     PROCESS_TABLE.read().get(&pid).ok_or(AxError::NoSuchProcess)
+}
+
+/// Finds the process with the given PID.
+///
+/// A zombie process may no longer have live [`ProcessData`] after its last
+/// thread exits, but POSIX process-id queries such as `getpgid(pid)` and
+/// `kill(pid, 0)` must still see it until the parent reaps it.
+pub fn get_process(pid: Pid) -> AxResult<Arc<Process>> {
+    if pid == 0 {
+        return Ok(current().as_thread().proc_data.proc.clone());
+    }
+    if let Ok(proc_data) = get_process_data(pid) {
+        return Ok(proc_data.proc.clone());
+    }
+
+    for group in PROCESS_GROUP_TABLE.read().values() {
+        if let Some(proc) = group.processes().into_iter().find(|proc| proc.pid() == pid) {
+            return Ok(proc);
+        }
+    }
+    Err(AxError::NoSuchProcess)
 }
 
 /// Finds the process group with the given PGID.
