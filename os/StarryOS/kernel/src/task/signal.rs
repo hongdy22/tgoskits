@@ -5,7 +5,8 @@ use starry_process::Pid;
 use starry_signal::{SignalInfo, SignalOSAction, SignalSet};
 
 use super::{
-    AsThread, SYSCALL_INSN_LEN, Thread, do_exit, get_process_data, get_process_group, get_task,
+    AsThread, SYSCALL_INSN_LEN, Thread, do_exit, get_process, get_process_data, get_process_group,
+    get_task,
 };
 
 /// Information needed to restart a syscall if SA_RESTART applies.
@@ -112,7 +113,15 @@ pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo
 
 /// Sends a signal to a process.
 pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> AxResult<()> {
-    let proc_data = get_process_data(pid)?;
+    let proc_data = match get_process_data(pid) {
+        Ok(proc_data) => proc_data,
+        Err(_) => {
+            if get_process(pid)?.is_zombie() {
+                return Ok(());
+            }
+            return Err(AxError::NoSuchProcess);
+        }
+    };
 
     if let Some(sig) = sig {
         let signo = sig.signo();
