@@ -8,12 +8,13 @@
 use std::{
     fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{Context, bail, ensure};
 use ostool::run::qemu::QemuConfig;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
@@ -33,6 +34,8 @@ const CASE_CROSS_BIN_DIR_NAME: &str = "cross-bin";
 const CASE_CMAKE_TOOLCHAIN_FILE_NAME: &str = "cmake-toolchain.cmake";
 const CASE_APK_CACHE_DIR_NAME: &str = "apk-cache";
 const CASE_SH_DIR_NAME: &str = "sh";
+const CASE_ASSETS_MANIFEST_NAME: &str = "assets.toml";
+const CASE_PREBUILT_DOWNLOAD_DIR_NAME: &str = "prebuilt-assets";
 const CASE_ROOTFS_COPY_NAME: &str = "case-rootfs.img";
 const PYTHON_PIPELINE_CACHE_VERSION: &str = "python-apk-v1";
 /// QEMU global snapshot flag — all disk writes go to a temporary file and are
@@ -136,6 +139,7 @@ pub(crate) enum CasePipeline {
     C,
     Sh,
     Python,
+    PrebuiltAssets,
 }
 
 impl CasePipeline {
@@ -146,8 +150,30 @@ impl CasePipeline {
             Self::C => "c",
             Self::Sh => "sh",
             Self::Python => "python",
+            Self::PrebuiltAssets => "prebuilt-assets",
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PrebuiltAssetsManifest {
+    #[serde(default)]
+    files: Vec<PrebuiltAssetFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrebuiltAssetFile {
+    /// Host file path. Relative paths are resolved from the workspace root
+    /// first, then from the case directory.
+    source: Option<String>,
+    /// Optional raw-file download fallback used when `source` is absent.
+    url: Option<String>,
+    /// Absolute destination path inside the guest rootfs.
+    guest_path: String,
+    /// Expected SHA-256 of the host/downloaded file.
+    sha256: String,
+    /// Optional octal mode, for example "0755".
+    mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +395,9 @@ pub(crate) fn prepare_case_assets_sync(
                 CasePipeline::Python => {
                     case_builder::prepare_python_case_assets_sync(arch, case, copy, layout, config)?
                 }
+                CasePipeline::PrebuiltAssets => {
+                    prepare_prebuilt_assets_case_assets_sync(workspace_root, case, copy, layout)?
+                }
                 CasePipeline::Plain => unreachable!("plain cases do not prepare injection assets"),
             }
             // Save the post-injection rootfs to cache so future runs can skip
@@ -425,6 +454,9 @@ pub(crate) fn resolve_case_pipeline(case: &TestQemuCase) -> anyhow::Result<CaseP
     if case_python_source_dir(case).is_dir() {
         pipelines.push(CasePipeline::Python);
     }
+    if case_assets_manifest_path(case).is_file() {
+        pipelines.push(CasePipeline::PrebuiltAssets);
+    }
 
     if pipelines.len() > 1 {
         bail!(
@@ -439,6 +471,10 @@ pub(crate) fn resolve_case_pipeline(case: &TestQemuCase) -> anyhow::Result<CaseP
     }
 
     Ok(pipelines.into_iter().next().unwrap_or(CasePipeline::Plain))
+}
+
+fn case_assets_manifest_path(case: &TestQemuCase) -> PathBuf {
+    case.case_dir.join(CASE_ASSETS_MANIFEST_NAME)
 }
 
 fn next_case_run_id() -> String {
@@ -694,6 +730,203 @@ pub(crate) fn prepare_sh_case_assets_sync(
     crate::rootfs::inject::inject_overlay(case_rootfs, &layout.overlay_dir)
 }
 
+/// Prepares overlay assets declared by `<case>/assets.toml`.
+pub(crate) fn prepare_prebuilt_assets_case_assets_sync(
+    workspace_root: &Path,
+    case: &TestQemuCase,
+    case_rootfs: &Path,
+    layout: &CaseAssetLayout,
+) -> anyhow::Result<()> {
+    let manifest_path = case_assets_manifest_path(case);
+    let manifest = load_prebuilt_assets_manifest(&manifest_path)?;
+    ensure!(
+        !manifest.files.is_empty(),
+        "{} has no [[files]] entries",
+        manifest_path.display()
+    );
+
+    reset_dir(&layout.overlay_dir)?;
+    for asset in &manifest.files {
+        install_prebuilt_asset(workspace_root, case, layout, asset)?;
+    }
+
+    crate::rootfs::inject::inject_overlay(case_rootfs, &layout.overlay_dir)
+}
+
+fn load_prebuilt_assets_manifest(path: &Path) -> anyhow::Result<PrebuiltAssetsManifest> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    toml::from_str(&content).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn install_prebuilt_asset(
+    workspace_root: &Path,
+    case: &TestQemuCase,
+    layout: &CaseAssetLayout,
+    asset: &PrebuiltAssetFile,
+) -> anyhow::Result<()> {
+    let source = resolve_prebuilt_asset_source(workspace_root, case, layout, asset)?;
+    verify_prebuilt_asset_sha256(&source, &asset.sha256)?;
+
+    let dest = guest_overlay_path(&layout.overlay_dir, &asset.guest_path)?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::copy(&source, &dest)
+        .with_context(|| format!("failed to copy {} to {}", source.display(), dest.display()))?;
+    if let Some(mode) = asset.mode.as_deref() {
+        set_octal_file_mode(&dest, mode)?;
+    }
+    Ok(())
+}
+
+fn resolve_prebuilt_asset_source(
+    workspace_root: &Path,
+    case: &TestQemuCase,
+    layout: &CaseAssetLayout,
+    asset: &PrebuiltAssetFile,
+) -> anyhow::Result<PathBuf> {
+    if let Some(source) = asset.source.as_deref() {
+        let source_path = Path::new(source);
+        let candidates = if source_path.is_absolute() {
+            vec![source_path.to_path_buf()]
+        } else {
+            vec![
+                workspace_root.join(source_path),
+                case.case_dir.join(source_path),
+            ]
+        };
+        for candidate in candidates {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    if let Some(url) = asset.url.as_deref() {
+        return download_prebuilt_asset(layout, asset, url);
+    }
+
+    bail!(
+        "missing prebuilt asset source for guest path `{}`; provide `source` or `url` in {}",
+        asset.guest_path,
+        case_assets_manifest_path(case).display()
+    )
+}
+
+fn download_prebuilt_asset(
+    layout: &CaseAssetLayout,
+    asset: &PrebuiltAssetFile,
+    url: &str,
+) -> anyhow::Result<PathBuf> {
+    let download_dir = layout.cache_dir.join(CASE_PREBUILT_DOWNLOAD_DIR_NAME);
+    fs::create_dir_all(&download_dir)
+        .with_context(|| format!("failed to create {}", download_dir.display()))?;
+    let file_name = asset
+        .sha256
+        .get(..16)
+        .filter(|prefix| !prefix.is_empty())
+        .unwrap_or("asset");
+    let path = download_dir.join(file_name);
+
+    if path.is_file() {
+        match verify_prebuilt_asset_sha256(&path, &asset.sha256) {
+            Ok(()) => return Ok(path),
+            Err(err) => {
+                eprintln!(
+                    "cached prebuilt asset {} is invalid ({err}); re-downloading",
+                    path.display()
+                );
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    let client = crate::support::download::http_client()?;
+    let handle = tokio::runtime::Handle::try_current()
+        .context("prebuilt asset download requires a Tokio runtime")?;
+    handle.block_on(crate::support::download::download_file(&client, url, &path))?;
+    Ok(path)
+}
+
+fn verify_prebuilt_asset_sha256(path: &Path, expected: &str) -> anyhow::Result<()> {
+    let expected = expected.trim().to_ascii_lowercase();
+    ensure!(
+        expected.len() == 64 && expected.chars().all(|c| c.is_ascii_hexdigit()),
+        "invalid SHA-256 `{expected}` for {}",
+        path.display()
+    );
+    let actual = file_sha256(path)?;
+    ensure!(
+        actual == expected,
+        "SHA-256 mismatch for {}: expected {}, got {}",
+        path.display(),
+        expected,
+        actual
+    );
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> anyhow::Result<String> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buf)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn guest_overlay_path(overlay_dir: &Path, guest_path: &str) -> anyhow::Result<PathBuf> {
+    let path = Path::new(guest_path);
+    ensure!(
+        path.is_absolute(),
+        "prebuilt asset guest_path must be absolute: `{guest_path}`"
+    );
+
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => relative.push(part),
+            _ => bail!("invalid prebuilt asset guest_path: `{guest_path}`"),
+        }
+    }
+    ensure!(
+        !relative.as_os_str().is_empty(),
+        "prebuilt asset guest_path cannot be root"
+    );
+    Ok(overlay_dir.join(relative))
+}
+
+fn set_octal_file_mode(path: &Path, mode: &str) -> anyhow::Result<()> {
+    let mode = u32::from_str_radix(mode.trim_start_matches("0o"), 8)
+        .with_context(|| format!("invalid octal mode `{mode}` for {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .permissions();
+        perms.set_mode(mode);
+        fs::set_permissions(path, perms)
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
 /// Resets a directory to an empty existing state.
 pub(crate) fn reset_dir(path: &Path) -> anyhow::Result<()> {
     if path.exists() {
@@ -813,6 +1046,66 @@ mod tests {
         assert!(assets.extra_qemu_args.contains(&"-snapshot".to_string()));
         // The shared image must be unmodified.
         assert_eq!(fs::read(&shared_img).unwrap(), b"rootfs");
+    }
+
+    #[test]
+    fn resolve_case_pipeline_detects_prebuilt_assets_manifest() {
+        let root = tempdir().unwrap();
+        let case = fake_case(root.path(), "codex-help");
+        fs::write(case.case_dir.join("assets.toml"), "[[files]]\n").unwrap();
+
+        assert_eq!(
+            resolve_case_pipeline(&case).unwrap(),
+            CasePipeline::PrebuiltAssets
+        );
+    }
+
+    #[test]
+    fn install_prebuilt_asset_copies_source_to_guest_overlay_path() {
+        let root = tempdir().unwrap();
+        let case = fake_case(root.path(), "codex-help");
+        let source = root.path().join("target/codex/assets/tool");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"hello").unwrap();
+        let sha256 = file_sha256(&source).unwrap();
+        let layout = case_asset_layout(root.path(), "x86_64-unknown-none", "codex-help").unwrap();
+        reset_dir(&layout.overlay_dir).unwrap();
+
+        install_prebuilt_asset(
+            root.path(),
+            &case,
+            &layout,
+            &PrebuiltAssetFile {
+                source: Some("target/codex/assets/tool".to_string()),
+                url: None,
+                guest_path: "/usr/local/bin/tool".to_string(),
+                sha256,
+                mode: Some("0755".to_string()),
+            },
+        )
+        .unwrap();
+
+        let copied = layout.overlay_dir.join("usr/local/bin/tool");
+        assert_eq!(fs::read(&copied).unwrap(), b"hello");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(copied).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+    }
+
+    #[test]
+    fn guest_overlay_path_rejects_parent_traversal() {
+        let root = tempdir().unwrap();
+        let err = guest_overlay_path(root.path(), "/usr/../bin/tool").unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("invalid prebuilt asset guest_path")
+        );
     }
 
     #[test]

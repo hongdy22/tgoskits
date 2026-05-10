@@ -44,6 +44,9 @@ test-suit/starryos/
         qemu-<arch>.toml
         python/
           test_hello.py
+      codex-help/
+        qemu-x86_64.toml
+        assets.toml
       bugfix/
         qemu-<arch>.toml
         <subcase>/c/CMakeLists.txt
@@ -87,6 +90,7 @@ test-suit/starryos/
 | `c` | case 目录下存在 `c/` | 使用 CMake 交叉编译，安装产物到 rootfs overlay |
 | `sh` | case 目录下存在 `sh/` | 将 shell 脚本注入 `/usr/bin/` |
 | `python` | case 目录下存在 `python/` | 在 staging rootfs 中安装 `python3`，并注入 `.py` 文件 |
+| `prebuilt-assets` | case 目录下存在 `assets.toml` | 校验 host 侧预编译资产的 SHA-256，并注入到指定 guest 路径 |
 | `grouped` | `qemu-<arch>.toml` 中存在 `test_commands` | 构建子目录中的 C subcase，生成 `/usr/bin/starry-run-case-tests` 顺序执行命令 |
 
 Pipeline case 会创建每个 case 独立的 rootfs 副本，并把注入后的 rootfs 缓存在：
@@ -227,6 +231,38 @@ Python case 使用 `python/`：
 ```
 
 Python pipeline 会自动在 staging rootfs 中安装 `python3`，再把 `.py` 文件复制到 `/usr/bin/`。
+
+## Prebuilt Assets 用例
+
+当 case 需要注入不适合提交到仓库的大型预编译二进制时，使用 `assets.toml`：
+
+```text
+<case>/
+  qemu-<arch>.toml
+  assets.toml
+```
+
+`assets.toml` 示例：
+
+```toml
+[[files]]
+source = "target/codex/assets/codex"
+guest_path = "/usr/local/bin/codex"
+sha256 = "..."
+mode = "0755"
+
+[[files]]
+source = "assets/root/.config/example.toml"
+guest_path = "/root/.config/example.toml"
+sha256 = "..."
+mode = "0644"
+```
+
+- `source` 可以是绝对路径；相对路径会先按仓库根目录解析，再按 case 目录解析。
+- `url` 可作为 raw file 下载 fallback；下载后的文件会缓存到 case workdir，并继续按 `sha256` 校验。
+- `guest_path` 必须是 guest 内绝对路径，不能包含 `..`。
+- `mode` 是可选八进制权限字符串。需要执行的二进制通常设置为 `0755`。
+- 大型二进制本身不要提交进仓库，应放在 `target/`、本地缓存或由 `url` 拉取。
 
 ## Board 用例
 
