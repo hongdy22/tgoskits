@@ -6,6 +6,7 @@ use ax_task::future::{self, block_on, poll_io};
 use axpoll::IoEvents;
 use linux_raw_sys::general::{POLLNVAL, pollfd, timespec};
 use starry_signal::SignalSet;
+use starry_vm::vm_write_slice;
 
 use super::FdPollSet;
 use crate::{
@@ -25,8 +26,9 @@ fn do_poll(
 
     let mut res = 0isize;
     let mut fds = Vec::with_capacity(poll_fds.len());
-    let mut revents = Vec::with_capacity(poll_fds.len());
-    for fd in poll_fds.iter_mut() {
+    let mut revent_indices = Vec::with_capacity(poll_fds.len());
+    for (index, fd) in poll_fds.iter_mut().enumerate() {
+        fd.revents = 0;
         if fd.fd == -1 {
             // Skip -1
             continue;
@@ -38,7 +40,7 @@ fn do_poll(
                     IoEvents::from_bits(fd.events as _).ok_or(AxError::InvalidInput)?
                         | IoEvents::ALWAYS_POLL,
                 ));
-                revents.push(&mut fd.revents);
+                revent_indices.push(index);
             }
             Err(_) => {
                 // If the fd is invalid, set revents to POLLNVAL
@@ -57,7 +59,7 @@ fn do_poll(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {
                 let mut res = 0usize;
-                for ((fd, events), revents) in fds.0.iter().zip(revents.iter_mut()) {
+                for ((fd, events), revent_index) in fds.0.iter().zip(revent_indices.iter()) {
                     let mut result = fd.poll();
                     if result.contains(IoEvents::IN) {
                         result |= IoEvents::RDNORM;
@@ -72,8 +74,9 @@ fn do_poll(
                     result &= *events;
                     result |= always_report;
 
-                    **revents = result.bits() as _;
-                    if **revents != 0 {
+                    let revents = &mut poll_fds[*revent_index].revents;
+                    *revents = result.bits() as _;
+                    if *revents != 0 {
                         res += 1;
                     }
                 }
@@ -92,13 +95,18 @@ fn do_poll(
 
 #[cfg(target_arch = "x86_64")]
 pub fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> AxResult<isize> {
-    let fds = fds.get_as_mut_slice(nfds as usize)?;
+    let nfds = nfds as usize;
+    let mut poll_fds = fds.get_as_mut_slice(nfds)?.to_vec();
     let timeout = if timeout < 0 {
         None
     } else {
         Some(TimeValue::from_millis(timeout as u64))
     };
-    do_poll(fds, timeout, None)
+    let res = do_poll(&mut poll_fds, timeout, None)?;
+    if nfds > 0 {
+        vm_write_slice(fds.as_ptr(), &poll_fds)?;
+    }
+    Ok(res)
 }
 
 pub fn sys_ppoll(
@@ -109,10 +117,19 @@ pub fn sys_ppoll(
     sigsetsize: usize,
 ) -> AxResult<isize> {
     check_sigset_size(sigsetsize)?;
-    let fds = fds.get_as_mut_slice(nfds.try_into().map_err(|_| AxError::InvalidInput)?)?;
+    let nfds = nfds.try_into().map_err(|_| AxError::InvalidInput)?;
+    let mut poll_fds = fds.get_as_mut_slice(nfds)?.to_vec();
     let timeout = nullable!(timeout.get_as_ref())?
         .map(|ts| ts.try_into_time_value())
         .transpose()?;
     // TODO: handle signal
-    do_poll(fds, timeout, nullable!(sigmask.get_as_ref())?.copied())
+    let res = do_poll(
+        &mut poll_fds,
+        timeout,
+        nullable!(sigmask.get_as_ref())?.copied(),
+    )?;
+    if nfds > 0 {
+        vm_write_slice(fds.as_ptr(), &poll_fds)?;
+    }
+    Ok(res)
 }
