@@ -1,0 +1,166 @@
+[
+  {
+    "round": 1,
+    "target": "busybox_nice",
+    "summary": "已完成 busybox_nice 闭环：按 issue #13 的 busybox_nice 行恢复 BusyBox 回归，确认 StarryOS riscv64 因 setpriority 未实现导致 FAIL，实现最小 setpriority/getpriority nice 值兼容补丁，并新增单一源码级用户态回归测试 bug-setpriority-current。Reviewer 结论待审查。",
+    "branch": "exp3_busybox-001-busybox_nice-20260508152649",
+    "commit": "9b20584f42554400b25c53d5d4309e55c2c6846e",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/syscall/mod.rs",
+      "os/StarryOS/kernel/src/syscall/task/clone.rs",
+      "os/StarryOS/kernel/src/syscall/task/schedule.rs",
+      "os/StarryOS/kernel/src/task/mod.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-setpriority-current/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-setpriority-current/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-08T15:26:55+00:00"
+  },
+  {
+    "round": 3,
+    "target": "busybox_iostat",
+    "summary": "已按上一轮 REVISE 修订 busybox_iostat：保留 issue #13 的 iostat 命令/oracle，恢复并验证原 busybox_mpstat interval 检查，补齐 /proc/stat、/proc/diskstats，并修复由 mpstat 暴露的 ppoll(NULL,0,NULL,NULL) 等待信号不返回问题。riscv64 bugfix 与 busybox QEMU 均已通过，提交 Reviewer 审查。",
+    "branch": "exp3_busybox-003-busybox_iostat-20260509021540",
+    "commit": "0298ea5d0b7de74e94e39f6b949e101a85889ec2",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/pseudofs/proc.rs",
+      "os/StarryOS/kernel/src/syscall/io_mpx/poll.rs",
+      "os/StarryOS/kernel/src/syscall/mod.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-alarm-pause/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-alarm-pause/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-proc-stat-diskstats/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-proc-stat-diskstats/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T02:15:44+00:00"
+  },
+  {
+    "round": 5,
+    "target": "busybox_ip",
+    "summary": "继续修订 round 4 的 busybox_ip，不更换目标。已按 Reviewer 要求移除 send/recv 对普通 FileLike 的读写 fallback，仅保留 Socket 与 NetlinkSocket 路径，非 socket/非 netlink fd 现在返回 ENOTSOCK 且无效 fd 保持 EBADF；扩展源码级回归覆盖普通文件与 pipe 上 send/sendmsg/recv/recvmsg 的 ENOTSOCK。Linux baseline、StarryOS riscv64 bugfix、BusyBox 全量回归、fmt、clippy 均已通过，提交 Reviewer 审查。",
+    "branch": "exp3_busybox-005-busybox_ip-20260509030144",
+    "commit": "4c0615a150dfe54e715ef23c29e7c76fddcb8b5d",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/file/mod.rs",
+      "os/StarryOS/kernel/src/file/net.rs",
+      "os/StarryOS/kernel/src/file/netlink.rs",
+      "os/StarryOS/kernel/src/syscall/net/io.rs",
+      "os/StarryOS/kernel/src/syscall/net/name.rs",
+      "os/StarryOS/kernel/src/syscall/net/socket.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-netlink-getlink/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-netlink-getlink/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T03:01:48+00:00"
+  },
+  {
+    "round": 6,
+    "target": "busybox_arp",
+    "summary": "已完成 busybox_arp 闭环：检查 journal/passed_commits 后排除已 PASS 的 busybox_nice、busybox_iostat、busybox_ip，选择当前 backlog 中未完成的 busybox_arp。issue #13 行为：FAIL 测试 busybox_arp，测试命令 busybox arp 2>&1，验证方式 grep -qF \"HWtype\"。Linux 上确认 /proc/net/arp 头部字段存在；StarryOS riscv64 复现为 /proc/net/arp 缺失，BusyBox 输出 \"arp: can't open '/proc/net/arp'\"。最小补丁在 procfs 增加 /proc/net/arp，提供 QEMU user-net 的 synthetic eth0 ARP 行；新增单一源码级用户态回归 bug-proc-net-arp，并只恢复本轮 busybox_arp 检查。riscv64 bugfix、BusyBox 全量回归、fmt、diff check、clippy 均已通过，提交 Reviewer 审查。",
+    "branch": "exp3_busybox-006-busybox_arp-20260509032132",
+    "commit": "7aad155a645a41e5cec3345f07a6a61cb5c93c95",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/pseudofs/proc.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-proc-net-arp/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-proc-net-arp/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T03:21:35+00:00"
+  },
+  {
+    "round": 7,
+    "target": "busybox_ipaddr",
+    "summary": "已完成 busybox_ipaddr 闭环并提交 Reviewer 审查。已检查 journal/passed commits，排除已 PASS 的 busybox_nice、busybox_iostat、busybox_ip、busybox_arp，选择当前 backlog 中未完成的 busybox_ipaddr。issue #13 行为记录为：FAIL 测试 busybox_ipaddr，测试命令 busybox ip addr 2>&1，验证方式 grep -qF \"inet\"。Linux BusyBox 基准通过，修复前 StarryOS riscv64 因 AF_NETLINK/NETLINK_ROUTE 缺失导致 no inet，最小补丁加入 synthetic RTM_GETADDR/RTM_GETLINK netlink 支持并恢复本轮 BusyBox 检查；新增单一源码级用户态回归 bug-netlink-getaddr。",
+    "branch": "exp3_busybox-007-busybox_ipaddr-20260509034756",
+    "commit": "9c8727bb6ffa2c43cf4814dfebd01a39c159eb22",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/file/mod.rs",
+      "os/StarryOS/kernel/src/file/net.rs",
+      "os/StarryOS/kernel/src/file/netlink.rs",
+      "os/StarryOS/kernel/src/syscall/net/io.rs",
+      "os/StarryOS/kernel/src/syscall/net/name.rs",
+      "os/StarryOS/kernel/src/syscall/net/socket.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-netlink-getaddr/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-netlink-getaddr/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T03:48:00+00:00"
+  },
+  {
+    "round": 8,
+    "target": "busybox_pidof",
+    "summary": "已完成 busybox_pidof 闭环并提交 Reviewer 审查。已检查 journal/passed commits，排除已 PASS 的 busybox_nice、busybox_iostat、busybox_ip、busybox_arp、busybox_ipaddr，选择当前 backlog 中未完成的 busybox_pidof。issue #13 行为记录为：FAIL 测试 busybox_pidof，测试命令 busybox pidof -s init 2>&1 || busybox pidof -s sh 2>&1，验证方式 grep -qF \"1\"。Linux BusyBox 基准通过，修复前 StarryOS riscv64 输出 7 且 /proc/1 缺失，根因是 init 进程用户可见 PID 使用底层 task id 且 procfs 根目录枚举 task id。最小补丁将 init process PID 固定为 1、保留真实线程 tid，并让 /proc 根目录按 process PID 枚举和解析；只恢复本轮 busybox_pidof 检查；新增单一源码级用户态回归 bug-proc-init-pid。riscv64 busybox、bugfix、fmt、diff check、clippy 均通过。",
+    "branch": "exp3_busybox-008-busybox_pidof-20260509041057",
+    "commit": "7560d73a3549548b584f2413de50e637213392e5",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/entry.rs",
+      "os/StarryOS/kernel/src/pseudofs/proc.rs",
+      "os/StarryOS/kernel/src/task/ops.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-proc-init-pid/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-proc-init-pid/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T04:11:00+00:00"
+  },
+  {
+    "round": 9,
+    "target": "busybox_iplink",
+    "summary": "已完成 busybox_iplink 闭环并提交 Reviewer 审查。已检查 journal/passed_commits，排除已 PASS 的 busybox_nice、busybox_iostat、busybox_ip、busybox_arp、busybox_ipaddr、busybox_pidof，选择当前 backlog 中未 PASS 的 busybox_iplink。issue #13 行为记录为：FAIL 测试 busybox_iplink，测试命令 busybox iplink 2>&1，验证方式 grep -qF \"link/\"。Linux BusyBox 基准通过；修复前 StarryOS riscv64 复现为 AF_NETLINK unsupported，busybox_iplink FAIL。最小补丁加入 NETLINK_ROUTE/RTM_GETLINK synthetic 支持、netlink bind/getsockname/send/recvmsg 路径和 SIOCGIFTXQLEN；只恢复本轮 busybox_iplink 检查；新增单一源码级用户态回归 bug-netlink-getlink。riscv64 bugfix、busybox、fmt、diff check、clippy 均通过。",
+    "branch": "exp3_busybox-009-busybox_iplink-20260509042556",
+    "commit": "805f314b117342dd7d32edc27cbb44fc090ddb27",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/file/mod.rs",
+      "os/StarryOS/kernel/src/file/net.rs",
+      "os/StarryOS/kernel/src/file/netlink.rs",
+      "os/StarryOS/kernel/src/syscall/net/io.rs",
+      "os/StarryOS/kernel/src/syscall/net/name.rs",
+      "os/StarryOS/kernel/src/syscall/net/socket.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-netlink-getlink/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-netlink-getlink/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T04:25:59+00:00"
+  },
+  {
+    "round": 11,
+    "target": "busybox_arping",
+    "summary": "继续 round 10 的 busybox_arping 修订，未更换目标。已修正 synthetic ARP reply 地址交换错误，并扩展 bug-packet-arping 单一源码级回归以断言 SHA/SPA/THA/TPA 字段；该回归会捕获上一版 TPA 被错误写成 request TPA 的问题。已补充 StarryOS riscv64 聚焦命令完整输出/rc，解释 synthetic reply 导致 StarryOS rc=0、Received 1 与 Linux 基准 rc=1、Received 0 的差异；issue #13 oracle 仍为 grep -qF \"Received\"。fmt、diff check、starry-kernel clippy、riscv64 bugfix QEMU、riscv64 busybox QEMU 均通过，提交 Reviewer 审查。",
+    "branch": "exp3_busybox-011-busybox_arping-20260509050837",
+    "commit": "7c94749fe7a9d203d05e9898b10b6baac35a9394",
+    "remote": "origin",
+    "pushed": true,
+    "changed_files": [
+      "os/StarryOS/kernel/src/file/mod.rs",
+      "os/StarryOS/kernel/src/file/packet.rs",
+      "os/StarryOS/kernel/src/syscall/net/io.rs",
+      "os/StarryOS/kernel/src/syscall/net/name.rs",
+      "os/StarryOS/kernel/src/syscall/net/socket.rs",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-packet-arping/c/CMakeLists.txt",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/bug-packet-arping/c/src/main.c",
+      "test-suit/starryos/normal/qemu-smp1/bugfix/qemu-riscv64.toml",
+      "test-suit/starryos/normal/qemu-smp1/busybox/sh/busybox-tests.sh"
+    ],
+    "created_at": "2026-05-09T05:08:40+00:00"
+  }
+]
